@@ -3,18 +3,16 @@
     Removes unauthorized or suspicious ACL entries from the AdminSDHolder object.
 
 .DESCRIPTION
-    After running Get-AdminSDHolderACL.ps1 and identifying suspicious permissions
-    (e.g., standard users with GenericAll, WriteDacl, or WriteOwner), this script
-    removes those illegitimate ACL entries from the AdminSDHolder object, neutralizing
-    any potential backdoor.
+    Identifies ACL entries on AdminSDHolder that are not in the default whitelist
+    of Well-Known SIDs and provides an option to remove them.
     
-    Uses Well-Known SIDs to identify legitimate accounts. Works on any AD language.
+    Uses SID-based whitelisting for universal language support.
 
 .PARAMETER AuditOnly
-    Default mode. Shows what WOULD be removed without modifying anything.
+    Default mode. Lists unauthorized entries without removing them.
 
 .PARAMETER Remediate
-    Actively removes unauthorized ACL entries. Asks for confirmation.
+    Removes unauthorized entries with confirmation prompt.
 
 .EXAMPLE
     .\Repair-AdminSDHolderACL.ps1 -AuditOnly
@@ -36,122 +34,107 @@ if ($Remediate) { $AuditOnly = $false }
 Import-Module ActiveDirectory
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " AdminSDHolder ACL Repair Tool (Backdoor Neutralizer)" -ForegroundColor Cyan
+Write-Host " AdminSDHolder ACL Repair (Remediation)" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Build the list of LEGITIMATE SIDs that are allowed on AdminSDHolder
 $Domain = Get-ADDomain
 $DomainSID = $Domain.DomainSID.Value
 $AdminSDHolderDN = "CN=AdminSDHolder,CN=System,$($Domain.DistinguishedName)"
 
+Write-Host "`n[*] Target: $AdminSDHolderDN" -ForegroundColor Yellow
+
 # Well-Known SIDs that are EXPECTED on AdminSDHolder by default
 $LegitSIDs = @(
-    "S-1-5-18",              # NT AUTHORITY\SYSTEM (LocalSystem)
-    "S-1-5-10",              # NT AUTHORITY\SELF
-    "S-1-5-11",              # NT AUTHORITY\Authenticated Users
-    "S-1-1-0",               # Everyone (Tout le monde) - limited ExtendedRight only
-    "S-1-5-32-544",          # BUILTIN\Administrators
-    "S-1-5-32-554",          # BUILTIN\Pre-Windows 2000 Compatible Access
-    "S-1-5-32-560",          # BUILTIN\Windows Authorization Access Group
-    "S-1-5-32-561",          # BUILTIN\Terminal Server License Servers
-    "$DomainSID-512",        # Domain Admins
-    "$DomainSID-519",        # Enterprise Admins
-    "$DomainSID-517"         # Cert Publishers (Éditeurs de certificats)
+    "S-1-5-18",           # SYSTEM
+    "S-1-5-10",           # SELF
+    "S-1-5-11",           # Authenticated Users
+    "S-1-1-0",            # Everyone
+    "S-1-5-32-544",       # BUILTIN\Administrators
+    "S-1-5-32-554",       # Pre-Windows 2000 Compatible Access
+    "S-1-5-32-560",       # Windows Authorization Access Group
+    "S-1-5-32-561",       # Terminal Server License Servers
+    "$DomainSID-512",     # Domain Admins
+    "$DomainSID-519",     # Enterprise Admins
+    "$DomainSID-517"      # Cert Publishers
 )
 
-Write-Host "`n[*] Target: $AdminSDHolderDN" -ForegroundColor Yellow
-Write-Host "[*] Legitimate SIDs loaded: $($LegitSIDs.Count)" -ForegroundColor Green
-
-# 2. Retrieve the ACL
 try {
     $ADObject = [ADSI]"LDAP://$AdminSDHolderDN"
     $ACL = $ADObject.ObjectSecurity
     $Rules = $ACL.GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier])
-} catch {
-    Write-Host "[!] ERROR: Could not retrieve AdminSDHolder ACL: $($_.Exception.Message)" -ForegroundColor Red
-    Exit
+}
+catch {
+    Write-Host "[!] ERROR: Could not access AdminSDHolder: $($_.Exception.Message)" -ForegroundColor Red
+    Exit 1
 }
 
-# 3. Identify unauthorized rules
-$SuspiciousRules = @()
-$LegitRules = @()
-
+# Identify unauthorized rules
+$Suspicious = @()
 foreach ($Rule in $Rules) {
     $SID = $Rule.IdentityReference.Value
-    
-    if ($LegitSIDs -contains $SID) {
-        $LegitRules += $Rule
-    } else {
-        # Resolve the SID to a human-readable name for display
+    if ($LegitSIDs -notcontains $SID) {
         try {
-            $Account = (New-Object System.Security.Principal.SecurityIdentifier($SID)).Translate([System.Security.Principal.NTAccount]).Value
-        } catch {
-            $Account = $SID
+            $Acc = (New-Object System.Security.Principal.SecurityIdentifier($SID)).Translate([System.Security.Principal.NTAccount]).Value
         }
-        
-        $SuspiciousRules += [PSCustomObject]@{
-            "Account"     = $Account
-            "SID"         = $SID
-            "Rights"      = $Rule.ActiveDirectoryRights.ToString()
-            "Access"      = $Rule.AccessControlType.ToString()
-            "RuleObject"  = $Rule
+        catch {
+            $Acc = $SID
+        }
+        $Suspicious += [PSCustomObject]@{
+            Account = $Acc
+            SID     = $SID
+            Rights  = $Rule.ActiveDirectoryRights.ToString()
+            Rule    = $Rule
         }
     }
 }
 
-# 4. Display results
-Write-Host "`n--- ACL ANALYSIS ---" -ForegroundColor Cyan
-Write-Host "Legitimate ACL entries: $($LegitRules.Count)" -ForegroundColor Green
-Write-Host "Suspicious ACL entries: $($SuspiciousRules.Count)" -ForegroundColor ($SuspiciousRules.Count -gt 0 ? 'Red' : 'Green')
-
-if ($SuspiciousRules.Count -eq 0) {
-    Write-Host "`n[+] AdminSDHolder ACL is CLEAN. No unauthorized entries found." -ForegroundColor Green
+if ($Suspicious.Count -eq 0) {
+    Write-Host "`n[+] AdminSDHolder ACL is clean. No unauthorized entries found." -ForegroundColor Green
     Exit
 }
 
-Write-Host "`nThe following ACL entries are NOT in the default whitelist:" -ForegroundColor Red
-$SuspiciousRules | Select-Object Account, SID, Rights, Access | Format-Table -AutoSize
+Write-Host "`n[!] Found $($Suspicious.Count) unauthorized ACL entries:" -ForegroundColor Red
+$Suspicious | Select-Object Account, SID, Rights | Format-Table -AutoSize
 
-# 5. Remediation
 if ($AuditOnly) {
-    Write-Host "[i] Script ran in -AuditOnly mode. No changes were made." -ForegroundColor Yellow
-    Write-Host "[i] To remove these entries, run with -Remediate." -ForegroundColor Yellow
+    Write-Host "[i] Run with -Remediate to remove these entries." -ForegroundColor Yellow
     Exit
 }
 
 if ($Remediate) {
     Write-Host "[!] WARNING: You are about to modify the AdminSDHolder Security Descriptor." -ForegroundColor Red
-    Write-Host "[!] This is a CRITICAL Active Directory object. Proceed with caution." -ForegroundColor Red
-    $Confirm = Read-Host "Remove $($SuspiciousRules.Count) unauthorized ACL entries? (Y/N)"
-    
+    $Confirm = Read-Host "Remove $($Suspicious.Count) unauthorized entries? (Y/N)"
     if ($Confirm -match "^[Yy]$") {
-        Write-Host "`n[*] Removing unauthorized ACL entries..." -ForegroundColor Cyan
-        
         $SuccessCount = 0
         $FailCount = 0
-
-        foreach ($Entry in $SuspiciousRules) {
-            Write-Host "   -> Removing: $($Entry.Account) ($($Entry.Rights))... " -NoNewline
+        foreach ($s in $Suspicious) {
+            Write-Host "   -> Removing $($s.Account) ($($s.Rights))... " -NoNewline
             try {
-                $ACL.RemoveAccessRule($Entry.RuleObject) | Out-Null
+                $ACL.RemoveAccessRule($s.Rule) | Out-Null
                 $SuccessCount++
-                Write-Host "Removed." -ForegroundColor Green
-            } catch {
+                Write-Host "Done" -ForegroundColor Green
+            }
+            catch {
                 $FailCount++
-                Write-Host "Failed! ($($_.Exception.Message))" -ForegroundColor Red
+                Write-Host "Failed ($($_.Exception.Message))" -ForegroundColor Red
             }
         }
 
-        # Commit changes
-        try {
-            $ADObject.CommitChanges()
-            Write-Host "`n[+] Changes committed to Active Directory." -ForegroundColor Green
-        } catch {
-            Write-Host "`n[!] FAILED to commit changes: $($_.Exception.Message)" -ForegroundColor Red
+        # Commit only if at least one removal succeeded
+        if ($SuccessCount -gt 0) {
+            try {
+                $ADObject.CommitChanges()
+                Write-Host "`n[+] Changes committed: $SuccessCount removed, $FailCount failed." -ForegroundColor Green
+            }
+            catch {
+                Write-Host "`n[!] FAILED to commit changes: $($_.Exception.Message)" -ForegroundColor Red
+            }
         }
-        
-        Write-Host "[*] Summary: $SuccessCount removed, $FailCount failed." -ForegroundColor ($FailCount -gt 0 ? 'Yellow' : 'Green')
-    } else {
-        Write-Host "`n[-] Remediation cancelled. No objects were modified." -ForegroundColor Yellow
+        else {
+            Write-Host "`n[-] No changes to commit." -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "[-] Cancelled. No changes were made." -ForegroundColor Yellow
     }
 }

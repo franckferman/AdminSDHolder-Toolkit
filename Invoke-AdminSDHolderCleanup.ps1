@@ -1,20 +1,19 @@
 <#
 .SYNOPSIS
-    Universal Audit and Cleanup tool for orphaned AdminSDHolder accounts (AdminCount=1).
+    Universally audits and cleans up orphaned AdminSDHolder (AdminCount=1) accounts.
 
 .DESCRIPTION
-    This script identifies "false positives" (users with AdminCount=1 who are no longer in
-    any privileged group) and cleans them up (reset AdminCount=0 and restores ACL inheritance).
+    This script identifies users with AdminCount=1 who are no longer members of any
+    privileged group and provides an option to clean them up (reset AdminCount=0 
+    and restore ACL inheritance).
     
-    [!] SUPERIORITY: This script uses Well-Known SIDs (Security Identifiers) completely 
-    bypassing OS language barriers (English, French, German, etc.). It works flawlessly 
-    on ANY Active Directory environment globally.
+    Uses Well-Known SIDs (not group names) for universal language compatibility.
 
 .PARAMETER AuditOnly
-    Switch to run the script in Audit mode only (default). No changes are made to AD.
+    Default mode. Lists orphaned accounts without making changes.
 
 .PARAMETER Remediate
-    Switch to actively clean up orphaned accounts. Asks for confirmation before execution.
+    Actively cleans up orphaned accounts. Asks for confirmation.
 
 .EXAMPLE
     .\Invoke-AdminSDHolderCleanup.ps1 -AuditOnly
@@ -31,80 +30,65 @@ param (
     [switch]$Remediate
 )
 
-# Force AuditOnly to false if Remediate is explicitly called
 if ($Remediate) { $AuditOnly = $false }
 
 Import-Module ActiveDirectory
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " Universal AdminSDHolder Cleanup Tool (SID-Based Resolution)" -ForegroundColor Cyan
+Write-Host " Universal AdminSDHolder Cleanup (SID-Based)" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Get the Domain SID dynamically (Works whatever the domain name is)
+# 1. Get Domain SID
 $Domain = Get-ADDomain
 $DomainSID = $Domain.DomainSID.Value
 
-# 2. Define Well-Known RIDs (Relative IDs) that Microsoft hardcodes for privileged groups
-# Docs: https://learn.microsoft.com/en-us/windows/security/identity-protection/access-control/security-identifiers
-$PrivilegedRIDs = @(
-    "512", # Domain Admins
-    "519", # Enterprise Admins
-    "518", # Schema Admins
-    "544", # Administrators (Built-in)
-    "548", # Account Operators
-    "549", # Server Operators
-    "551", # Backup Operators
-    "550"  # Print Operators
-)
+# 2. Build Protected SIDs using Well-Known RIDs
+# Domain-relative RIDs (prefixed with the domain SID)
+$DomainRIDs = @("512", "517", "518", "519")
+# Builtin RIDs (always under S-1-5-32)
+$BuiltinRIDs = @("544", "548", "549", "550", "551")
 
-# 3. Build the absolute SIDs for the current domain
 $ProtectedSIDs = @()
-foreach ($RID in $PrivilegedRIDs) {
-    # 544, 548, 549, 550, 551 belong to the Builtin domain (S-1-5-32) globally
-    if ($RID -match "^54|55") {
-        $ProtectedSIDs += "S-1-5-32-$RID"
-    } else {
-        # 512, 518, 519 belong to the specific Domain
-        $ProtectedSIDs += "$DomainSID-$RID"
-    }
-}
+foreach ($RID in $DomainRIDs) { $ProtectedSIDs += "$DomainSID-$RID" }
+foreach ($RID in $BuiltinRIDs) { $ProtectedSIDs += "S-1-5-32-$RID" }
 
-Write-Host "`n[*] Resolving Protected Groups SIDs... " -NoNewline
+Write-Host "`n[*] Resolving $($ProtectedSIDs.Count) Protected Groups... " -NoNewline
 $GroupsDN = @()
 foreach ($SID in $ProtectedSIDs) {
-    $Group = Get-ADGroup -Identity $SID -ErrorAction SilentlyContinue 
-    if ($Group) {
+    try {
+        $Group = Get-ADGroup -Identity $SID -ErrorAction Stop
         $GroupsDN += $Group.DistinguishedName
     }
+    catch {
+        Write-Host "`n  [!] Could not resolve SID: $SID" -ForegroundColor Yellow
+    }
 }
-Write-Host "Done." -ForegroundColor Green
+Write-Host "Done ($($GroupsDN.Count) resolved)." -ForegroundColor Green
 
-# 4. Define SafeList by SIDs instead of Names (krbtgt = 502, Administrator = 500)
+# 3. SafeList: built-in accounts to never touch (by SID)
 $SafeListSIDs = @(
-    "$DomainSID-500", # Built-in Administrator
-    "$DomainSID-502"  # krbtgt account
+    "$DomainSID-500",  # Built-in Administrator
+    "$DomainSID-502"   # krbtgt
 )
 
-
-Write-Host "[*] Searching for Users with AdminCount=1... " -NoNewline
-$AdminUsers = Get-ADUser -Filter {AdminCount -eq 1} -Properties AdminCount, MemberOf, PrimaryGroupId -ErrorAction Stop
+# 4. Get all users with AdminCount=1
+Write-Host "[*] Searching for users with AdminCount=1... " -NoNewline
+$AdminUsers = Get-ADUser -Filter { AdminCount -eq 1 } -Properties AdminCount, MemberOf, PrimaryGroupId -ErrorAction Stop
 Write-Host "Found $($AdminUsers.Count) users." -ForegroundColor Yellow
-
 
 $UsersToClean = @()
 $LegitAdmins = @()
 
 foreach ($User in $AdminUsers) {
-    
-    # Check if user is in the ultimate SafeList (by SID)
+    # Skip safe-listed accounts
     if ($SafeListSIDs -contains $User.SID.Value) {
         $LegitAdmins += $User
         continue
     }
 
     $IsProtected = $false
-    
-    # Check standard MemberOf (Groups)
+
+    # Check direct group membership
     if ($User.MemberOf) {
         foreach ($MemberOfGroup in $User.MemberOf) {
             if ($GroupsDN -contains $MemberOfGroup) {
@@ -114,74 +98,69 @@ foreach ($User in $AdminUsers) {
         }
     }
     
-    # Check Primary Group if not already protected (usually SID ending in 512 for Domain Admins)
+    # Check Primary Group (not shown in MemberOf)
     if (-not $IsProtected -and $User.PrimaryGroupId) {
-        $PrimaryGroup = Get-ADGroup -Filter {PrimaryGroupToken -eq $User.PrimaryGroupId} -ErrorAction SilentlyContinue
-        if ($PrimaryGroup -and ($GroupsDN -contains $PrimaryGroup.DistinguishedName)) {
-            $IsProtected = $true
+        foreach ($SID in $ProtectedSIDs) {
+            try {
+                $PG = Get-ADGroup -Identity $SID -ErrorAction Stop
+                if ($PG.SID.Value -match "-$($User.PrimaryGroupId)$") {
+                    $IsProtected = $true
+                    break
+                }
+            }
+            catch { }
         }
     }
 
-    if ($IsProtected) {
-        $LegitAdmins += $User
-    } else {
-        $UsersToClean += $User
-    }
+    if ($IsProtected) { $LegitAdmins += $User }
+    else { $UsersToClean += $User }
 }
 
+# 5. Display results
 Write-Host "`n--- AUDIT RESULTS ---" -ForegroundColor Cyan
-Write-Host "Legitimate protected users remaining: $($LegitAdmins.Count)" -ForegroundColor Green
-Write-Host "Orphaned users (False Positives) needing cleanup: $($UsersToClean.Count)" -ForegroundColor Red
+Write-Host "Legitimate admins: $($LegitAdmins.Count)" -ForegroundColor Green
+Write-Host "Orphaned accounts (false positives): $($UsersToClean.Count)" -ForegroundColor Red
 
-if ($UsersToClean.Count -gt 0) {
-    Write-Host "`nThe following accounts are identified as false positives:"
-    $UsersToClean | Select-Object Name, SamAccountName | Format-Table -AutoSize
-} else {
-    Write-Host "`n[+] No orphaned accounts found. Your AD is clean and healthy!" -ForegroundColor Green
+if ($UsersToClean.Count -eq 0) {
+    Write-Host "`n[+] No orphaned accounts found. Your AD is clean!" -ForegroundColor Green
     Exit
 }
 
+$UsersToClean | Select-Object Name, SamAccountName | Format-Table -AutoSize
 
-# --- REMEDIATION PHASE ---
 if ($AuditOnly) {
-    Write-Host "`n[i] Script ran in -AuditOnly mode. No changes were made." -ForegroundColor Yellow
-    Write-Host "[i] To clean these accounts, run the script with the -Remediate switch." -ForegroundColor Yellow
+    Write-Host "[i] Run with -Remediate to clean up these accounts." -ForegroundColor Yellow
     Exit
 }
 
+# 6. Remediation
 if ($Remediate) {
-    Write-Host "`n[!] WARNING: You are about to modify Active Directory objects." -ForegroundColor Red
-    $Confirm = Read-Host "Do you want to proceed and clean up these $($UsersToClean.Count) accounts? (Y/N)"
-    
+    Write-Host "[!] WARNING: This will modify $($UsersToClean.Count) AD objects." -ForegroundColor Red
+    $Confirm = Read-Host "Proceed? (Y/N)"
     if ($Confirm -match "^[Yy]$") {
-        Write-Host "`n[*] Starting Cleanup Process..." -ForegroundColor Cyan
-        
         $SuccessCount = 0
         $FailCount = 0
-
         foreach ($User in $UsersToClean) {
-            Write-Host "   -> Cleaning up user: $($User.SamAccountName)... " -NoNewline
+            Write-Host "   -> Cleaning $($User.SamAccountName)... " -NoNewline
             try {
-                # 1. Clear AdminCount Attribute
+                # Clear AdminCount attribute
                 Set-ADUser -Identity $User.DistinguishedName -Clear AdminCount -ErrorAction Stop
-                
-                # 2. Restore Permission Inheritance
+                # Restore ACL inheritance
                 $ADUser = [ADSI]"LDAP://$($User.DistinguishedName)"
                 $ACL = $ADUser.ObjectSecurity
-                
-                # SetAccessRuleProtection(isProtected, preserveInheritance)
                 $ACL.SetAccessRuleProtection($false, $false)
                 $ADUser.CommitChanges()
-                
                 Write-Host "Success" -ForegroundColor Green
                 $SuccessCount++
-            } catch {
+            }
+            catch {
                 Write-Host "Failed ($($_.Exception.Message))" -ForegroundColor Red
                 $FailCount++
             }
         }
-        Write-Host "`n[*] Cleanup Summary: $SuccessCount succeeded, $FailCount failed." -ForegroundColor ($FailCount -gt 0 ? 'Yellow' : 'Green')
-    } else {
-        Write-Host "`n[-] Remediation Cancelled by user. No objects were modified." -ForegroundColor Yellow
+        Write-Host "`n[*] Cleanup finished: $SuccessCount succeeded, $FailCount failed." -ForegroundColor Green
+    }
+    else {
+        Write-Host "[-] Cancelled." -ForegroundColor Yellow
     }
 }

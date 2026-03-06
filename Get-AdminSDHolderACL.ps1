@@ -1,23 +1,21 @@
 <#
 .SYNOPSIS
-    Audits the Access Control List (ACL) of the AdminSDHolder object for backdoors.
+    Audits the AdminSDHolder object ACL for potential backdoors.
 
 .DESCRIPTION
-    The AdminSDHolder object acts as a template for all privileged accounts in Active Directory.
-    A common persistence technique (backdoor) is to grant a standard user "GenericAll" or 
-    "WriteDacl" rights on this specific object. The SDProp process will then automatically 
-    push this attacker-controlled permission to all Domain Admins every 60 minutes.
+    Analyzes the Security Descriptor of the AdminSDHolder object and flags 
+    suspicious permissions (GenericAll, WriteDacl, WriteOwner) from unauthorized accounts.
     
-    This script retrieves and formats the ACL of the AdminSDHolder container, highlighting 
-    potentially dangerous permissions to help Blue Teams spot persistence mechanisms.
+    Uses SID-based whitelisting for universal language support.
+
+.PARAMETER ExportCSV
+    Optional. Export findings to a CSV file.
 
 .EXAMPLE
     .\Get-AdminSDHolderACL.ps1
-    Retrieves all explicit and inherited permissions on the AdminSDHolder object.
 
 .EXAMPLE
     .\Get-AdminSDHolderACL.ps1 -ExportCSV "C:\temp\AdminSDHolder_ACL.csv"
-    Exports the ACL audit results to a CSV file for reporting.
 
 .AUTHOR
     Frank Ferman
@@ -30,83 +28,93 @@ param (
 Import-Module ActiveDirectory
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " AdminSDHolder ACL Audit Tool (Backdoor Hunter)" -ForegroundColor Cyan
+Write-Host " AdminSDHolder Backdoor Hunter" -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-# 1. Get Domain and build the AdminSDHolder Distinguished Name
 $Domain = Get-ADDomain
+$DomainSID = $Domain.DomainSID.Value
 $AdminSDHolderDN = "CN=AdminSDHolder,CN=System,$($Domain.DistinguishedName)"
 Write-Host "`n[*] Target: $AdminSDHolderDN" -ForegroundColor Yellow
 
+# Well-Known SIDs that are EXPECTED on AdminSDHolder by default
+$LegitSIDs = @(
+    "S-1-5-18",           # SYSTEM
+    "S-1-5-10",           # SELF
+    "S-1-5-11",           # Authenticated Users
+    "S-1-1-0",            # Everyone
+    "S-1-5-32-544",       # BUILTIN\Administrators
+    "S-1-5-32-554",       # Pre-Windows 2000 Compatible Access
+    "S-1-5-32-560",       # Windows Authorization Access Group
+    "S-1-5-32-561",       # Terminal Server License Servers
+    "$DomainSID-512",     # Domain Admins
+    "$DomainSID-519",     # Enterprise Admins
+    "$DomainSID-517"      # Cert Publishers
+)
+
 try {
-    # 2. Retrieve the ADSI object and its Security Descriptor
-    Write-Host "[*] Retrieving Security Descriptor... " -NoNewline
     $ADObject = [ADSI]"LDAP://$AdminSDHolderDN"
     $ACL = $ADObject.ObjectSecurity
-    Write-Host "Success." -ForegroundColor Green
-} catch {
-    Write-Host "Failed!" -ForegroundColor Red
-    Write-Host "[!] Error: $($_.Exception.Message)" -ForegroundColor Red
-    Exit
+}
+catch {
+    Write-Host "[!] ERROR: Could not access AdminSDHolder: $($_.Exception.Message)" -ForegroundColor Red
+    Exit 1
 }
 
-# 3. Parse and format the ACL rules
-Write-Host "[*] Parsing Access Control Rules..." -NoNewline
-$InterestingRights = @()
-$AccessRules = $ACL.GetAccessRules($true, $true, [System.Security.Principal.NTAccount])
+# Read ACLs using SIDs (language-agnostic)
+$Rules = $ACL.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
 
-foreach ($Rule in $AccessRules) {
-    # We focus only on "Allow" rules (Deny rules are rarely used for backdoors)
+$Results = @()
+foreach ($Rule in $Rules) {
     if ($Rule.AccessControlType -eq "Allow") {
-        
-        $AccountName = $Rule.IdentityReference.Value
+        $SID = $Rule.IdentityReference.Value
         $Rights = $Rule.ActiveDirectoryRights.ToString()
         
-        # Determine Threat Level based on the rights granted
-        $ThreatLevel = "Low/Standard"
-        if ($Rights -match "GenericAll|WriteDacl|WriteOwner|CreateChild") {
-            $ThreatLevel = "HIGH (Potential Backdoor)"
+        # Resolve SID to friendly name
+        try {
+            $Account = (New-Object System.Security.Principal.SecurityIdentifier($SID)).Translate([System.Security.Principal.NTAccount]).Value
+        }
+        catch {
+            $Account = $SID
         }
 
-        # Build PS Custom Object
-        $Info = [PSCustomObject]@{
-            "Account"       = $AccountName
-            "Permissions"   = $Rights
-            "IsInherited"   = $Rule.IsInherited
-            "ThreatLevel"   = $ThreatLevel
+        # Determine threat level
+        $Threat = "Low/Standard"
+        $IsLegit = $LegitSIDs -contains $SID
+        if ($Rights -match "GenericAll|WriteDacl|WriteOwner" -and -not $IsLegit) {
+            $Threat = "HIGH (Potential Backdoor)"
         }
-        $InterestingRights += $Info
+
+        $Results += [PSCustomObject]@{
+            Account     = $Account
+            SID         = $SID
+            Permissions = $Rights
+            ThreatLevel = $Threat
+        }
     }
 }
-Write-Host " Done.`n" -ForegroundColor Green
 
-
-# 4. Display Results
-Write-Host "--- ACL AUDIT RESULTS ---" -ForegroundColor Cyan
-
-# Highlight suspicious entries in Red if found
-$Suspicious = $InterestingRights | Where-Object { $_.ThreatLevel -match "HIGH" -and $_.Account -notmatch "SYSTEM|Administrators" }
+# Display results
+Write-Host "`n--- ACL AUDIT RESULTS ---" -ForegroundColor Cyan
+$Suspicious = $Results | Where-Object { $_.ThreatLevel -match "HIGH" }
 
 if ($Suspicious) {
-    Write-Host "`n[!] WARNING: SUSPICIOUS HIGH-PRIVILEGE PERMISSIONS FOUND!" -ForegroundColor Red
-    $Suspicious | Format-Table -AutoSize
-} else {
-    Write-Host "[+] No obvious non-standard backdoors detected. Review the full list below:`n" -ForegroundColor Green
+    Write-Host "`n[!] SUSPICIOUS PERMISSIONS FOUND!" -ForegroundColor Red
+    Write-Host "[!] The following entries are NOT in the default whitelist and have dangerous rights:" -ForegroundColor Red
+    $Suspicious | Select-Object Account, SID, Permissions, ThreatLevel | Format-Table -AutoSize
+}
+else {
+    Write-Host "[+] No high-threat backdoors detected." -ForegroundColor Green
 }
 
-# Display full table
-$InterestingRights | Sort-Object Account | Format-Table -AutoSize
+Write-Host "`n--- FULL ACL LIST ---" -ForegroundColor Cyan
+$Results | Sort-Object ThreatLevel, Account | Select-Object Account, Permissions, ThreatLevel | Format-Table -AutoSize
 
-# 5. Export to CSV if requested
 if ($ExportCSV) {
     try {
-        $InterestingRights | Export-Csv -Path $ExportCSV -NoTypeInformation -Encoding UTF8
-        Write-Host "`n[+] Results successfully exported to: $ExportCSV" -ForegroundColor Green
-    } catch {
-        Write-Host "`n[-] Failed to export CSS: $($_.Exception.Message)" -ForegroundColor Red
+        $Results | Export-Csv -Path $ExportCSV -NoTypeInformation -Encoding UTF8
+        Write-Host "[+] Results exported to $ExportCSV" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[-] Failed to export: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
-
-Write-Host "`n[i] HOW TO READ THIS REPORT:" -ForegroundColor Cyan
-Write-Host " -> Standard Users/Service Accounts MUST NOT have 'GenericAll', 'WriteDacl', or 'WriteOwner'."
-Write-Host " -> Only Built-in 'SYSTEM' and 'Administrators' groups typically require full control."

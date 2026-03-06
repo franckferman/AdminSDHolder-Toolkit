@@ -57,31 +57,31 @@ if ($Missing.Count -gt 0) {
 function Show-Banner {
     Clear-Host
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║                                                      ║" -ForegroundColor Cyan
-    Write-Host "  ║        AdminSDHolder-Toolkit  v1.0                   ║" -ForegroundColor Cyan
-    Write-Host "  ║        Active Directory Security Toolkit             ║" -ForegroundColor Cyan
-    Write-Host "  ║                                                      ║" -ForegroundColor Cyan
-    Write-Host "  ╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  ==========================================================" -ForegroundColor Cyan
+    Write-Host "  =                                                        =" -ForegroundColor Cyan
+    Write-Host "  =        AdminSDHolder-Toolkit  v1.0                     =" -ForegroundColor Cyan
+    Write-Host "  =        Active Directory Security Toolkit               =" -ForegroundColor Cyan
+    Write-Host "  =                                                        =" -ForegroundColor Cyan
+    Write-Host "  ==========================================================" -ForegroundColor Cyan
     Write-Host ""
 }
 
 function Show-Menu {
-    Write-Host "  ┌──────────────────────────────────────────────────────┐" -ForegroundColor DarkGray
-    Write-Host "  │  AUDIT                                               │" -ForegroundColor DarkGray
-    Write-Host "  │    [1] Audit orphaned AdminCount accounts            │" -ForegroundColor White
-    Write-Host "  │    [2] Detect AdminSDHolder ACL backdoors            │" -ForegroundColor White
-    Write-Host "  │    [3] Full Audit (1 + 2 combined)                   │" -ForegroundColor White
-    Write-Host "  │                                                      │" -ForegroundColor DarkGray
-    Write-Host "  │  REMEDIATION                                         │" -ForegroundColor DarkGray
-    Write-Host "  │    [4] Cleanup orphaned AdminCount accounts          │" -ForegroundColor Yellow
-    Write-Host "  │    [5] Repair AdminSDHolder ACL (remove backdoors)   │" -ForegroundColor Yellow
-    Write-Host "  │                                                      │" -ForegroundColor DarkGray
-    Write-Host "  │  TESTING                                             │" -ForegroundColor DarkGray
-    Write-Host "  │    [6] Simulate backdoor (PoC)                       │" -ForegroundColor Red
-    Write-Host "  │                                                      │" -ForegroundColor DarkGray
-    Write-Host "  │    [Q] Quit                                          │" -ForegroundColor DarkGray
-    Write-Host "  └──────────────────────────────────────────────────────┘" -ForegroundColor DarkGray
+    Write-Host "  ----------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "  |  AUDIT                                                 |" -ForegroundColor DarkGray
+    Write-Host "  |    [1] Audit orphaned AdminCount accounts              |" -ForegroundColor White
+    Write-Host "  |    [2] Detect AdminSDHolder ACL backdoors              |" -ForegroundColor White
+    Write-Host "  |    [3] Full Audit (1 + 2 combined)                     |" -ForegroundColor White
+    Write-Host "  |                                                        |" -ForegroundColor DarkGray
+    Write-Host "  |  REMEDIATION                                           |" -ForegroundColor DarkGray
+    Write-Host "  |    [4] Cleanup orphaned AdminCount accounts            |" -ForegroundColor Yellow
+    Write-Host "  |    [5] Repair AdminSDHolder ACL (remove backdoors)     |" -ForegroundColor Yellow
+    Write-Host "  |                                                        |" -ForegroundColor DarkGray
+    Write-Host "  |  TESTING                                               |" -ForegroundColor DarkGray
+    Write-Host "  |    [6] Simulate backdoor (PoC)                         |" -ForegroundColor Red
+    Write-Host "  |                                                        |" -ForegroundColor DarkGray
+    Write-Host "  |    [Q] Quit                                            |" -ForegroundColor DarkGray
+    Write-Host "  ----------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -100,13 +100,15 @@ function Invoke-Action {
         "3" {
             Write-Host "  === PHASE 1: Orphaned AdminCount Audit ===" -ForegroundColor Cyan
             & "$ScriptRoot\Invoke-AdminSDHolderCleanup.ps1" -AuditOnly
-            Write-Host "`n  === PHASE 2: AdminSDHolder ACL Backdoor Scan ===" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "  === PHASE 2: AdminSDHolder ACL Backdoor Scan ===" -ForegroundColor Cyan
             & "$ScriptRoot\Get-AdminSDHolderACL.ps1"
         }
         "FullAudit" {
             Write-Host "  === PHASE 1: Orphaned AdminCount Audit ===" -ForegroundColor Cyan
             & "$ScriptRoot\Invoke-AdminSDHolderCleanup.ps1" -AuditOnly
-            Write-Host "`n  === PHASE 2: AdminSDHolder ACL Backdoor Scan ===" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "  === PHASE 2: AdminSDHolder ACL Backdoor Scan ===" -ForegroundColor Cyan
             & "$ScriptRoot\Get-AdminSDHolderACL.ps1"
         }
         
@@ -152,7 +154,9 @@ do {
     $Choice = Read-Host "  Select an option"
     
     if ($Choice -match "^[Qq]$") {
-        Write-Host "`n  Goodbye!`n" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "  Goodbye!" -ForegroundColor Cyan
+        Write-Host ""
         break
     }
 

@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [stable, dev]
+  pull_request:
+    branches: [stable]
+
+jobs:
+  lint-powershell:
+    name: PSScriptAnalyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        run: Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+
+      - name: Analyze Public scripts
+        shell: pwsh
+        run: |
+          $settings = './.github/PSScriptAnalyzerSettings.psd1'
+          $results = Invoke-ScriptAnalyzer -Path ./Public -Recurse -Severity Warning,Error -Settings $settings
+          if ($results) {
+            $results | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Host "[+] PSScriptAnalyzer: no issues."
+
+      - name: Analyze root scripts
+        shell: pwsh
+        run: |
+          $settings = './.github/PSScriptAnalyzerSettings.psd1'
+          $results = Invoke-ScriptAnalyzer -Path ./AdminSDHolder.ps1 -Severity Warning,Error -Settings $settings
+          if ($results) {
+            $results | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Host "[+] PSScriptAnalyzer: AdminSDHolder.ps1 clean."
+
+  lint-python:
+    name: Python syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check
+        run: |
+          python3 -m py_compile tools/Invoke-PSEncoder.py
+          python3 -m py_compile tools/Sign-Scripts.py 2>/dev/null || true
+          echo "[+] Python syntax OK."
+
+  verify-structure:
+    name: Verify structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required files
+        run: |
+          required=(
+            "AdminSDHolder.ps1"
+            "AdminSDHolder.psm1"
+            "Private/Constants.ps1"
+            "Private/Helpers.ps1"
+            "Public/Get-AdminSDHolderACL.ps1"
+            "Public/Invoke-AdminSDHolderCleanup.ps1"
+            "Public/Repair-AdminSDHolderACL.ps1"
+            "Public/Add-AdminSDHolderBackdoor.ps1"
+            "tools/Invoke-PSEncoder.py"
+            "docs/index.html"
+          )
+          fail=0
+          for f in "${required[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "[!] Missing: $f"
+              fail=1
+            else
+              echo "[+] $f"
+            fi
+          done
+          exit $fail
